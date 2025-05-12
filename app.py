@@ -116,8 +116,31 @@ def fetch_macd_data():
                     "MACD", "Signal_line", "Histogram"
                 ]]
 
-                final_df.to_sql("macd_data", engine, if_exists="append", index=False)
-                total_saved += 1
+                # 🛑 Skip already existing date+symbol combinations
+                with engine.connect() as conn:
+                    # Prepare tuples for IN clause
+                    pairs = [f"('{row.date.date()}', '{row.stock_symbol}')" for _, row in final_df.iterrows()]
+                    if not pairs:
+                        continue
+                    placeholders = ', '.join(pairs)
+                    existing_query = f"""
+                        SELECT date, stock_symbol FROM macd_data
+                        WHERE (date, stock_symbol) IN ({placeholders})
+                    """
+                    existing = pd.read_sql(existing_query, conn)
+
+                # Remove already existing rows
+                if not existing.empty:
+                    existing_set = set(zip(existing['date'].dt.date, existing['stock_symbol']))
+                    final_df = final_df[~final_df.apply(
+                        lambda row: (row['date'].date(), row['stock_symbol']) in existing_set, axis=1)]
+
+                # Save only if there's new data
+                if not final_df.empty:
+                    final_df.to_sql("macd_data", engine, if_exists="append", index=False)
+                    total_saved += 1
+                else:
+                    print(f"⏩ Skipping {stock}: All data already exists.")
 
             except Exception as stock_error:
                 print(f"❌ Error for {stock}: {stock_error}")
@@ -130,6 +153,7 @@ def fetch_macd_data():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 # ✅ Recalculate MACD using database data + user price
 @app.route('/api/recalculate-macd', methods=['POST'])
