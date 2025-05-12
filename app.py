@@ -19,7 +19,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # ✅ MySQL Database Connection
 db_user = "u218267760_stock"
 db_password = "+!s[CyA6"
-db_host = "localhost"
+db_host = "194.59.164.10"
 db_name = "u218267760_stock"
 engine = create_engine(f"mysql+pymysql://{db_user}:{db_password}@{db_host}/{db_name}")
 
