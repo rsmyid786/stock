@@ -88,7 +88,7 @@ def fetch_macd_data():
             try:
                 print(f"📈 Fetching data for {stock}...")
                 ticker = yf.Ticker(stock)
-                data = ticker.history(period="6mo", interval="1d").reset_index()
+                data = ticker.history(period="1mo", interval="1d").reset_index()
 
                 if data.empty or "Close" not in data.columns:
                     print(f"⚠️ Skipping {stock}: No Close data.")
