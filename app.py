@@ -8,6 +8,7 @@ import yfinance as yf
 import time
 import requests
 import warnings
+from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET  # Replaced lxml with built-in xml.etree.ElementTree
 
 app = Flask(__name__)
@@ -80,80 +81,79 @@ def fetch_stock_data():
 # ✅ Route to fetch MACD data and store it
 @app.route('/api/fetch-macd', methods=['GET'])
 def fetch_macd_data():
-    try:
-        stock_symbols = get_nse_stocks()
-        total_saved = 0
+    stock_symbols = get_nse_stocks()
+    total_saved = 0
+    days_back = 30
+    start_date = datetime.now() - timedelta(days=days_back)
 
-        for stock in stock_symbols:
-            try:
-                print(f"📈 Fetching data for {stock}...")
-                ticker = yf.Ticker(stock)
-                data = ticker.history(period="1mo", interval="1d").reset_index()
+    # STEP 1: Load existing data in the last 30 days
+    with engine.connect() as conn:
+        existing_df = pd.read_sql(f"""
+            SELECT stock_symbol, date FROM macd_data
+            WHERE date >= '{start_date.date()}'
+        """, conn)
+        existing_df['date'] = pd.to_datetime(existing_df['date'])
+    
+    existing_map = {}
+    for _, row in existing_df.iterrows():
+        existing_map.setdefault(row['stock_symbol'], set()).add(row['date'].date())
 
-                if data.empty or "Close" not in data.columns:
-                    print(f"⚠️ Skipping {stock}: No Close data.")
-                    continue
+    for stock in stock_symbols:
+        try:
+            print(f"🔍 Checking {stock}...")
 
-                # Calculate MACD
-                data["EMA_12"] = data["Close"].ewm(span=12, adjust=False).mean()
-                data["EMA_26"] = data["Close"].ewm(span=26, adjust=False).mean()
-                data["MACD"] = data["EMA_12"] - data["EMA_26"]
-                data["Signal_line"] = data["MACD"].ewm(span=9, adjust=False).mean()
-                data["Histogram"] = data["MACD"] - data["Signal_line"]
-                data["stock_symbol"] = stock
-
-                # Rename and select
-                data = data.rename(columns={
-                    "Open": "open",
-                    "High": "high",
-                    "Low": "low",
-                    "Close": "close",
-                    "Date": "date"
-                })
-
-                final_df = data[[
-                    "date", "stock_symbol", "open", "high", "low", "close",
-                    "MACD", "Signal_line", "Histogram"
-                ]]
-
-                # 🛑 Skip already existing date+symbol combinations
-                with engine.connect() as conn:
-                    # Prepare tuples for IN clause
-                    pairs = [f"('{row.date.date()}', '{row.stock_symbol}')" for _, row in final_df.iterrows()]
-                    if not pairs:
-                        continue
-                    placeholders = ', '.join(pairs)
-                    existing_query = f"""
-                        SELECT date, stock_symbol FROM macd_data
-                        WHERE (date, stock_symbol) IN ({placeholders})
-                    """
-                    existing = pd.read_sql(existing_query, conn)
-
-                # Remove already existing rows
-                if not existing.empty:
-                    existing_set = set(zip(existing['date'].dt.date, existing['stock_symbol']))
-                    final_df = final_df[~final_df.apply(
-                        lambda row: (row['date'].date(), row['stock_symbol']) in existing_set, axis=1)]
-
-                # Save only if there's new data
-                if not final_df.empty:
-                    final_df.to_sql("macd_data", engine, if_exists="append", index=False)
-                    total_saved += 1
-                else:
-                    print(f"⏩ Skipping {stock}: All data already exists.")
-
-            except Exception as stock_error:
-                print(f"❌ Error for {stock}: {stock_error}")
+            # Skip stocks that already have data for every day in the past month
+            if stock in existing_map and len(existing_map[stock]) >= 20:
+                print(f"✅ Skipping {stock}: Already has recent data.")
                 continue
 
-            # ✅ Add delay to prevent rate-limiting
-            time.sleep(2)
+            print(f"📈 Fetching data for {stock}...")
+            ticker = yf.Ticker(stock)
+            data = ticker.history(period="1mo", interval="1d").reset_index()
 
-        return jsonify({"message": f"{total_saved} stocks processed and saved!"})
+            if data.empty or "Close" not in data.columns:
+                print(f"⚠️ Skipping {stock}: No Close data.")
+                continue
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+            # MACD logic
+            data["EMA_12"] = data["Close"].ewm(span=12, adjust=False).mean()
+            data["EMA_26"] = data["Close"].ewm(span=26, adjust=False).mean()
+            data["MACD"] = data["EMA_12"] - data["EMA_26"]
+            data["Signal_line"] = data["MACD"].ewm(span=9, adjust=False).mean()
+            data["Histogram"] = data["MACD"] - data["Signal_line"]
+            data["stock_symbol"] = stock
 
+            data = data.rename(columns={
+                "Open": "open",
+                "High": "high",
+                "Low": "low",
+                "Close": "close",
+                "Date": "date"
+            })
+
+            final_df = data[[
+                "date", "stock_symbol", "open", "high", "low", "close",
+                "MACD", "Signal_line", "Histogram"
+            ]]
+
+            # Remove rows that already exist
+            if stock in existing_map:
+                final_df = final_df[~final_df['date'].dt.date.isin(existing_map[stock])]
+
+            if not final_df.empty:
+                with engine.connect() as conn:
+                    final_df.to_sql("macd_data", conn, if_exists="append", index=False)
+                    total_saved += 1
+            else:
+                print(f"⏩ Skipping {stock}: All rows already exist.")
+
+            time.sleep(1)
+
+        except Exception as stock_error:
+            print(f"❌ Error for {stock}: {stock_error}")
+            continue
+
+    return f"✅ {total_saved} stocks processed and saved."
 
 # ✅ Recalculate MACD using database data + user price
 @app.route('/api/recalculate-macd', methods=['POST'])
